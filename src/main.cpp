@@ -322,6 +322,44 @@ static void populateListView(HWND hList, DlgData& d) {
     }
 }
 
+static LRESULT colorListViewRow(NMLVCUSTOMDRAW* draw, DlgData* d) {
+    if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+        return CDRF_NOTIFYITEMDRAW;
+    }
+
+    if (draw->nmcd.dwDrawStage != CDDS_ITEMPREPAINT || !d) {
+        return CDRF_DODEFAULT;
+    }
+
+    int row = static_cast<int>(draw->nmcd.dwItemSpec);
+    if (row < 0 || row >= static_cast<int>(d->items.size())) {
+        return CDRF_DODEFAULT;
+    }
+
+    const auto& ref = d->items[row];
+    if (ref.g < 0 || ref.f < 0) {
+        return CDRF_DODEFAULT;
+    }
+
+    wchar_t status[32] = {};
+    ListView_GetItemText(draw->nmcd.hdr.hwndFrom, row, 0, status,
+                         static_cast<int>(std::size(status)));
+    if (wcscmp(status, L"Deleted") == 0) {
+        draw->clrText = RGB(96, 96, 96);
+        draw->clrTextBk = RGB(245, 245, 245);
+        return CDRF_NEWFONT;
+    }
+
+    if (ref.f == 0) {
+        draw->clrText = RGB(24, 105, 56);
+        draw->clrTextBk = RGB(236, 249, 241);
+    } else {
+        draw->clrText = RGB(170, 38, 38);
+        draw->clrTextBk = RGB(255, 239, 239);
+    }
+    return CDRF_NEWFONT;
+}
+
 // ---- Delete logic -------------------------------------------------------
 
 static bool recycleFile(const std::wstring& path) {
@@ -565,6 +603,15 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             return TRUE;
+        }
+        break;
+    }
+
+    case WM_NOTIFY: {
+        auto* hdr = reinterpret_cast<NMHDR*>(lp);
+        if (hdr && hdr->idFrom == IDC_LIST && hdr->code == NM_CUSTOMDRAW) {
+            return colorListViewRow(
+                reinterpret_cast<NMLVCUSTOMDRAW*>(lp), d);
         }
         break;
     }
