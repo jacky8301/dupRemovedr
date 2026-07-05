@@ -1,0 +1,38 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+#pragma code_page(65001)   // UTF-8
+
+IDI_APP_ICON ICON "app.ico"
+
+IDD_MAIN_DLG DIALOGEX 0, 0, 560, 380
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Duplicate File Cleaner"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT   "Folder:",          -1,              10,  12,  35,  12
+    CONTROL "",                 IDC_FOLDER_PATH, "Static",
+            SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE,
+                                                    50,  12, 365,  12
+    PUSHBUTTON "&Browse...",    IDC_BROWSE_BTN, 425,   8,  60,  22
+    PUSHBUTTON "&Scan",         IDC_SCAN_BTN,   495,   8,  55,  22
+
+    LTEXT   "Preparing...",     IDC_STATUS,       10,  38, 540,  12
+    CONTROL "",                 IDC_PROGRESS,     "msctls_progress32",
+            PBS_SMOOTH | WS_CHILD | WS_VISIBLE,   10,  56, 540,  14
+
+    CONTROL "",                 IDC_LIST,         "SysListView32",
+            LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
+                                                    10,  78, 540, 242
+
+    LTEXT   "Context menu:",    -1,               10, 329,  80,  12
+    LTEXT   "",                 IDC_MENU_STATUS,  95, 329, 455,  12
+
+    PUSHBUTTON "&Del Dup",      IDC_DELETE_BTN,   10, 348, 125,  24
+    PUSHBUTTON "&Register",     IDC_INSTALL_BTN, 145, 348, 125,  24
+    PUSHBUTTON "&Unregister",   IDC_UNINSTALL_BTN,
+                                                   280, 348, 125,  24
+    PUSHBUTTON "&Close",        IDC_CLOSE_BTN,   415, 348, 135,  24
+END
