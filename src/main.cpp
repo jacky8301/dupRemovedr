@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <string>
 #include <vector>
@@ -58,12 +59,116 @@ static std::wstring fmtSize(uint64_t bytes) {
 
 static bool isContextMenuRegistered() {
     HKEY key = nullptr;
-    LSTATUS status = RegOpenKeyExW(
-        HKEY_CLASSES_ROOT, L"Directory\\shell\\FindDupFiles",
-        0, KEY_READ, &key);
-    if (status == ERROR_SUCCESS) {
-        RegCloseKey(key);
+    const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_CLASSES_ROOT };
+    const wchar_t* paths[] = {
+        L"Software\\Classes\\Directory\\shell\\FindDupFiles",
+        L"Directory\\shell\\FindDupFiles",
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        LSTATUS status = RegOpenKeyExW(roots[i], paths[i], 0, KEY_READ, &key);
+        if (status == ERROR_SUCCESS) {
+            RegCloseKey(key);
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::wstring getModulePath() {
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        DWORD len = GetModuleFileNameW(
+            nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (len == 0) return {};
+        if (len < path.size()) {
+            path.resize(len);
+            return path;
+        }
+        path.resize(path.size() * 2);
+    }
+}
+
+static bool setRegistryString(HKEY key, const wchar_t* valueName,
+                              const std::wstring& value) {
+    DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    return RegSetValueExW(
+        key, valueName, 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(value.c_str()), bytes) == ERROR_SUCCESS;
+}
+
+static bool registerContextMenu(std::wstring& error) {
+    std::wstring exePath = getModulePath();
+    if (exePath.empty()) {
+        error = L"Cannot determine the application path.";
+        return false;
+    }
+
+    HKEY menuKey = nullptr;
+    LSTATUS status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\Directory\\shell\\FindDupFiles",
+        0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE,
+        nullptr, &menuKey, nullptr);
+    if (status != ERROR_SUCCESS) {
+        error = L"Failed to create the context menu registry key.";
+        return false;
+    }
+
+    std::wstring iconValue = exePath + L",0";
+    bool ok = setRegistryString(menuKey, nullptr, L"Find Duplicate Files") &&
+              setRegistryString(menuKey, L"Icon", iconValue);
+    RegCloseKey(menuKey);
+    if (!ok) {
+        error = L"Failed to write the context menu registry values.";
+        return false;
+    }
+
+    HKEY commandKey = nullptr;
+    status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\Directory\\shell\\FindDupFiles\\command",
+        0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE,
+        nullptr, &commandKey, nullptr);
+    if (status != ERROR_SUCCESS) {
+        error = L"Failed to create the context menu command registry key.";
+        return false;
+    }
+
+    std::wstring command = L"\"" + exePath + L"\" \"%1\"";
+    ok = setRegistryString(commandKey, nullptr, command);
+    RegCloseKey(commandKey);
+    if (!ok) {
+        error = L"Failed to write the context menu command.";
+        return false;
+    }
+
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return true;
+}
+
+static bool unregisterContextMenu(std::wstring& error) {
+    LSTATUS userStatus = RegDeleteTreeW(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\Directory\\shell\\FindDupFiles");
+    LSTATUS machineStatus = RegDeleteTreeW(
+        HKEY_CLASSES_ROOT,
+        L"Directory\\shell\\FindDupFiles");
+
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+
+    if (machineStatus == ERROR_ACCESS_DENIED) {
+        error = L"Removed the current-user registration if present, but an "
+                L"old machine-wide registration needs Administrator rights.";
+        return false;
+    }
+
+    if (userStatus == ERROR_SUCCESS || machineStatus == ERROR_SUCCESS ||
+        (userStatus == ERROR_FILE_NOT_FOUND &&
+         machineStatus == ERROR_FILE_NOT_FOUND)) {
         return true;
+    } else {
+        error = L"Failed to remove the context menu registration.";
     }
     return false;
 }
@@ -228,63 +333,6 @@ static bool recycleFile(const std::wstring& path) {
     f.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION
              | FOF_NOERRORUI  | FOF_SILENT;
     return SHFileOperationW(&f) == 0;
-}
-
-static std::filesystem::path findSiblingScript(const wchar_t* scriptName) {
-    wchar_t modulePath[MAX_PATH] = {};
-    DWORD len = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) return {};
-
-    std::filesystem::path exeDir =
-        std::filesystem::path(modulePath).parent_path();
-
-    std::filesystem::path candidates[] = {
-        exeDir / scriptName,
-        exeDir.parent_path() / scriptName
-    };
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::exists(candidate))
-            return candidate;
-    }
-    return {};
-}
-
-static bool launchContextMenuScript(HWND owner, const wchar_t* scriptName) {
-    std::filesystem::path scriptPath = findSiblingScript(scriptName);
-    if (scriptPath.empty()) {
-        std::wstring message = L"Cannot find ";
-        message += scriptName;
-        message += L".\nExpected it next to dupRemover.exe or its parent folder.";
-        MessageBoxW(owner, message.c_str(), L"Script not found",
-                    MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    std::wstring parameters = L"/c \"\"";
-    parameters += scriptPath.wstring();
-    parameters += L"\"\"";
-
-    SHELLEXECUTEINFOW sei = {};
-    sei.cbSize = sizeof(sei);
-    sei.hwnd = owner;
-    sei.lpVerb = L"runas";
-    sei.lpFile = L"cmd.exe";
-    sei.lpParameters = parameters.c_str();
-    std::wstring workingDir = scriptPath.parent_path().wstring();
-    sei.lpDirectory = workingDir.c_str();
-    sei.nShow = SW_SHOWNORMAL;
-
-    if (!ShellExecuteExW(&sei)) {
-        DWORD err = GetLastError();
-        if (err != ERROR_CANCELLED) {
-            wchar_t buf[256];
-            swprintf_s(buf, L"Failed to launch %s.\nError code: %lu",
-                       scriptName, err);
-            MessageBoxW(owner, buf, L"Launch failed", MB_OK | MB_ICONERROR);
-        }
-        return false;
-    }
-    return true;
 }
 
 static int deleteDuplicates(DlgData& d, HWND hList) {
@@ -490,16 +538,31 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
 
         case IDC_INSTALL_BTN:
-            if (launchContextMenuScript(hDlg, L"install.bat")) {
-                SetDlgItemTextW(hDlg, IDC_MENU_STATUS,
-                    L"Registration command started. Close its window to finish.");
+            {
+                std::wstring error;
+                if (registerContextMenu(error)) {
+                    updateScanControls(hDlg, d);
+                    SetDlgItemTextW(hDlg, IDC_MENU_STATUS,
+                        L"Registered for the current user.");
+                } else {
+                    MessageBoxW(hDlg, error.c_str(), L"Registration failed",
+                                MB_OK | MB_ICONERROR);
+                }
             }
             return TRUE;
 
         case IDC_UNINSTALL_BTN:
-            if (launchContextMenuScript(hDlg, L"uninstall.bat")) {
-                SetDlgItemTextW(hDlg, IDC_MENU_STATUS,
-                    L"Unregister command started. Close its window to finish.");
+            {
+                std::wstring error;
+                if (unregisterContextMenu(error)) {
+                    updateScanControls(hDlg, d);
+                    SetDlgItemTextW(hDlg, IDC_MENU_STATUS,
+                        L"Context menu removed.");
+                } else {
+                    updateScanControls(hDlg, d);
+                    MessageBoxW(hDlg, error.c_str(), L"Unregistration failed",
+                                MB_OK | MB_ICONWARNING);
+                }
             }
             return TRUE;
         }

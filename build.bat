@@ -61,7 +61,7 @@ if errorlevel 1 (
 
 echo.
 echo [OK] Build complete: bin\dupRemover.exe
-echo Run install.bat AS ADMIN to register the context menu.
+echo Use the Register button in the app to add the Explorer context menu.
 
 echo.
 echo === Building console tests ===
