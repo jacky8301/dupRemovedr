@@ -1,8 +1,6 @@
 #include "md5.h"
 #include <windows.h>
 #include <cstring>
-#include <sstream>
-#include <iomanip>
 #include <memory>
 
 // ---- MD5 core (RFC 1321) ------------------------------------------------
@@ -157,44 +155,97 @@ MD5::Digest MD5::finalize() {
 }
 
 std::string MD5::toHex(const Digest& digest) {
-    std::ostringstream oss;
-    oss << std::hex << std::setfill('0');
-    for (uint8_t b : digest) {
-        oss << std::setw(2) << static_cast<int>(b);
+    constexpr char hex[] = "0123456789abcdef";
+    std::string result(32, '0');
+    for (size_t i = 0; i < digest.size(); ++i) {
+        result[i * 2] = hex[digest[i] >> 4];
+        result[i * 2 + 1] = hex[digest[i] & 15];
     }
-    return oss.str();
+    return result;
 }
 
-std::string MD5::hashFile(const std::wstring& filepath) {
-    HANDLE hFile = CreateFileW(
-        filepath.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN,
-        nullptr
-    );
+namespace {
 
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return {};
-    }
+// 文件句柄由作用域管理，提前取消和读取失败时也会关闭。
+struct ReadHandle {
+    HANDLE value;
+    ~ReadHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+};
+
+bool cancelled(const std::function<bool()>& check) {
+    return check && check();
+}
+
+bool unchanged(HANDLE file, const BY_HANDLE_FILE_INFORMATION& before) {
+    BY_HANDLE_FILE_INFORMATION after{};
+    return GetFileInformationByHandle(file, &after) &&
+           before.nFileSizeHigh == after.nFileSizeHigh &&
+           before.nFileSizeLow == after.nFileSizeLow &&
+           CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) == 0;
+}
+
+bool fileInfo(HANDLE file, uint64_t expectedSize, BY_HANDLE_FILE_INFORMATION& info) {
+    if (!GetFileInformationByHandle(file, &info)) return false;
+    const uint64_t size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) |
+                          info.nFileSizeLow;
+    return expectedSize == (std::numeric_limits<uint64_t>::max)() || size == expectedSize;
+}
+
+} // 匿名命名空间
+
+std::string MD5::hashFile(const std::wstring& filepath,
+                         const std::function<bool()>& isCancelled,
+                         uint64_t expectedSize) {
+    if (cancelled(isCancelled)) return {};
+    ReadHandle file{CreateFileW(filepath.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+    if (file.value == INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION before{};
+    if (!fileInfo(file.value, expectedSize, before)) return {};
 
     MD5 md5;
-    constexpr size_t BUF_SIZE = 256 * 1024; // 256 KB chunks
-    auto buf = std::make_unique<uint8_t[]>(BUF_SIZE);
-    DWORD bytesRead = 0;
-    DWORD lastError = NO_ERROR;
-
-    while (ReadFile(hFile, buf.get(), BUF_SIZE, &bytesRead, nullptr) && bytesRead > 0) {
-        md5.update(buf.get(), bytesRead);
+    // 每个扫描线程复用缓冲区，避免为每个文件重新分配和清零。
+    constexpr DWORD bufferSize = 1024 * 1024;
+    thread_local auto buffer = std::make_unique<uint8_t[]>(bufferSize);
+    for (;;) {
+        if (cancelled(isCancelled)) return {};
+        DWORD bytesRead = 0;
+        // 直接检查 ReadFile 的返回值，成功读取不依赖残留错误码。
+        if (!ReadFile(file.value, buffer.get(), bufferSize, &bytesRead, nullptr)) return {};
+        if (bytesRead == 0) break;
+        md5.update(buffer.get(), bytesRead);
     }
-    lastError = GetLastError();
-    CloseHandle(hFile);
+    if (cancelled(isCancelled) || !unchanged(file.value, before)) return {};
+    return toHex(md5.finalize());
+}
 
-    if (lastError != NO_ERROR && lastError != ERROR_HANDLE_EOF) {
-        return {};
+std::string MD5::hashFileSample(const std::wstring& filepath, uint64_t expectedSize,
+                               const std::function<bool()>& isCancelled) {
+    if (expectedSize <= sampleBytes)
+        return hashFile(filepath, isCancelled, expectedSize);
+    if (cancelled(isCancelled)) return {};
+    ReadHandle file{CreateFileW(filepath.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_RANDOM_ACCESS, nullptr)};
+    if (file.value == INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION before{};
+    if (!fileInfo(file.value, expectedSize, before)) return {};
+
+    MD5 md5;
+    constexpr DWORD blockSize = static_cast<DWORD>(sampleBytes / 3);
+    uint8_t buffer[blockSize];
+    const uint64_t offsets[] = {0, (expectedSize - blockSize) / 2, expectedSize - blockSize};
+    for (uint64_t offset : offsets) {
+        if (cancelled(isCancelled)) return {};
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(offset);
+        DWORD bytesRead = 0;
+        if (!SetFilePointerEx(file.value, position, nullptr, FILE_BEGIN) ||
+            !ReadFile(file.value, buffer, blockSize, &bytesRead, nullptr) ||
+            bytesRead != blockSize) return {};
+        md5.update(buffer, bytesRead);
     }
-
+    if (cancelled(isCancelled) || !unchanged(file.value, before)) return {};
     return toHex(md5.finalize());
 }

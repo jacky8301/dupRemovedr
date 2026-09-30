@@ -2,37 +2,35 @@
 #include <commctrl.h>
 #include "resource.h"
 
-#pragma code_page(65001)   // UTF-8
+#pragma code_page(65001)
 
 IDI_APP_ICON ICON "app.ico"
 
-IDD_MAIN_DLG DIALOGEX 0, 0, 560, 380
-STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Duplicate File Cleaner"
-FONT 9, "Segoe UI", 400, 0, 0x1
+// 控件位置在运行时按窗口大小和 DPI 调整。
+IDD_MAIN_DLG DIALOGEX 0, 0, 620, 430
+STYLE DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN
+CAPTION "重复文件清理"
+FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
 BEGIN
-    LTEXT   "Folder:",          -1,              10,  12,  35,  12
-    CONTROL "",                 IDC_FOLDER_PATH, "Static",
-            SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE,
-                                                    50,  12, 365,  12
-    PUSHBUTTON "&Browse...",    IDC_BROWSE_BTN, 425,   8,  60,  22
-    PUSHBUTTON "&Scan",         IDC_SCAN_BTN,   495,   8,  55,  22
-
-    LTEXT   "Preparing...",     IDC_STATUS,       10,  38, 540,  12
-    CONTROL "",                 IDC_PROGRESS,     "msctls_progress32",
-            PBS_SMOOTH | WS_CHILD | WS_VISIBLE,   10,  56, 540,  14
-
-    CONTROL "",                 IDC_LIST,         "SysListView32",
-            LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                                                    10,  78, 540, 242
-
-    LTEXT   "Context menu:",    -1,               10, 329,  80,  12
-    LTEXT   "",                 IDC_MENU_STATUS,  95, 329, 455,  12
-
-    PUSHBUTTON "&Del Dup",      IDC_DELETE_BTN,   10, 348, 125,  24
-    PUSHBUTTON "&Register",     IDC_INSTALL_BTN, 145, 348, 125,  24
-    PUSHBUTTON "&Unregister",   IDC_UNINSTALL_BTN,
-                                                   280, 348, 125,  24
-    PUSHBUTTON "&Close",        IDC_CLOSE_BTN,   415, 348, 135,  24
+    LTEXT "重复文件清理", IDC_TITLE, 0, 0, 1, 1
+    LTEXT "找出重复副本，让文件夹更清爽", IDC_SUBTITLE, 0, 0, 1, 1
+    CONTROL "请选择扫描目录", IDC_FOLDER_PATH, "Static", SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    CONTROL "选择文件夹", IDC_BROWSE_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL "开始扫描", IDC_SCAN_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL "准备就绪", IDC_STATUS, "Static", SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    CONTROL "", IDC_PROGRESS, "msctls_progress32", PBS_SMOOTH | PBS_MARQUEE | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    LTEXT "已扫描文件", IDC_FILES_LABEL, 0, 0, 1, 1
+    LTEXT "—", IDC_FILES_VALUE, 0, 0, 1, 1
+    LTEXT "重复副本", IDC_DUP_LABEL, 0, 0, 1, 1
+    LTEXT "—", IDC_DUP_VALUE, 0, 0, 1, 1
+    LTEXT "可释放空间", IDC_SPACE_LABEL, 0, 0, 1, 1
+    LTEXT "—", IDC_SPACE_VALUE, 0, 0, 1, 1
+    LTEXT "扫描结果", IDC_RESULTS_LABEL, 0, 0, 1, 1
+    LTEXT "绿色保留 · 红色为重复副本 · 清理后移入回收站", IDC_HINT, 0, 0, 1, 1
+    CONTROL "", IDC_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1
+    LTEXT "", IDC_MENU_STATUS, 0, 0, 1, 1
+    CONTROL "添加右键菜单", IDC_INSTALL_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL "移除右键菜单", IDC_UNINSTALL_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL "清理重复副本", IDC_DELETE_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
+    CONTROL "关闭", IDC_CLOSE_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
 END

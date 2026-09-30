@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <unordered_map>
+#include <algorithm>
 
 // ---- Helpers ------------------------------------------------------------
 
@@ -34,7 +35,10 @@ DuplicateScanner::enumerateFiles(const std::wstring& folder,
 
         std::wstring pattern = buildFindPattern(currentDir);
         WIN32_FIND_DATAW fd;
-        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+        HANDLE hFind = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd,
+            FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (hFind == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER)
+            hFind = FindFirstFileW(pattern.c_str(), &fd);
         if (hFind == INVALID_HANDLE_VALUE) continue;
 
         do {
@@ -45,11 +49,14 @@ DuplicateScanner::enumerateFiles(const std::wstring& folder,
                 continue;
 
             std::wstring fullPath = currentDir;
-            if (fullPath.back() != L'\\') fullPath += L'\\';
+            if (!fullPath.empty() && fullPath.back() != L'\\' && fullPath.back() != L'/')
+                fullPath += L'\\';
             fullPath += fd.cFileName;
 
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                dirs.push_back(fullPath);
+                // 不递归目录联接和符号链接，避免循环及重复遍历。
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                    dirs.push_back(fullPath);
             } else {
                 ULARGE_INTEGER size;
                 size.LowPart  = fd.nFileSizeLow;
@@ -69,40 +76,64 @@ std::vector<DuplicateGroup>
 DuplicateScanner::groupByHash(
     const std::vector<std::pair<std::wstring, uint64_t>>& files,
     ProgressFn onProgress,
-    CancelFn isCancelled)
+    CancelFn isCancelled,
+    ScanResult& stats)
 {
-    struct GroupInfo {
-        std::vector<std::wstring> paths;
-        uint64_t size = 0;
+    std::unordered_map<uint64_t, std::vector<size_t>> sizes;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (shouldCancel(isCancelled)) return {};
+        sizes[files[i].second].push_back(i);
+    }
+    const int total = static_cast<int>(files.size());
+    int completed = 0;
+    auto report = [&](const std::wstring& path) {
+        if (onProgress) onProgress(++completed, total, path);
+        else ++completed;
     };
-    std::unordered_map<std::string, GroupInfo> map;
-
-    int total = static_cast<int>(files.size());
-    for (int i = 0; i < total; ++i) {
-        if (shouldCancel(isCancelled)) break;
-
-        const auto& [path, size] = files[i];
-
-        if (onProgress) onProgress(i + 1, total, path);
-        if (shouldCancel(isCancelled)) break;
-
-        std::string hash = MD5::hashFile(path);
-        if (hash.empty()) continue; // skip unreadable files
-
-        auto& info = map[hash];
-        info.paths.push_back(path);
-        if (info.size == 0) info.size = size;
-    }
-
     std::vector<DuplicateGroup> result;
-    for (auto& [hash, info] : map) {
-        if (info.paths.size() < 2) continue;
-        DuplicateGroup g;
-        g.md5      = hash;
-        g.files    = std::move(info.paths);
-        g.fileSize = info.size;
-        result.push_back(std::move(g));
+    for (const auto& [size, indices] : sizes) {
+        if (shouldCancel(isCancelled)) return {};
+        if (indices.size() == 1) {
+            // 大小唯一的文件无需打开，也不需要读取内容。
+            report(files[indices.front()].first);
+            continue;
+        }
+        std::unordered_map<std::string, std::vector<size_t>> samples;
+        for (size_t index : indices) {
+            if (shouldCancel(isCancelled)) return {};
+            auto hash = MD5::hashFileSample(files[index].first, size, isCancelled);
+            if (size <= MD5::sampleBytes) ++stats.hashedFiles;
+            else ++stats.sampledFiles;
+            if (hash.empty()) report(files[index].first);
+            else samples[hash].push_back(index);
+        }
+        for (const auto& [sample, candidates] : samples) {
+            if (shouldCancel(isCancelled)) return {};
+            std::unordered_map<std::string, std::vector<std::wstring>> hashes;
+            for (size_t index : candidates) {
+                if (shouldCancel(isCancelled)) return {};
+                // 小文件的采样已覆盖全文；大文件必须用完整 MD5 二次确认。
+                const bool needsHash = size > MD5::sampleBytes && candidates.size() > 1;
+                std::string hash;
+                if (size <= MD5::sampleBytes) hash = sample;
+                else if (needsHash) {
+                    ++stats.hashedFiles;
+                    hash = MD5::hashFile(files[index].first, isCancelled, size);
+                }
+                if (!hash.empty()) hashes[hash].push_back(files[index].first);
+                report(files[index].first);
+            }
+            for (auto& [hash, paths] : hashes) {
+                if (paths.size() < 2) continue;
+                std::sort(paths.begin(), paths.end());
+                result.push_back({hash, std::move(paths), size});
+            }
+        }
     }
+    // 固定分组与保留文件的顺序，结果不受哈希表遍历顺序影响。
+    std::sort(result.begin(), result.end(), [](const DuplicateGroup& a, const DuplicateGroup& b) {
+        return a.files.front() < b.files.front();
+    });
     return result;
 }
 
@@ -116,7 +147,7 @@ ScanResult DuplicateScanner::scan(const std::wstring& folder,
     result.totalFiles = static_cast<int>(files.size());
     if (shouldCancel(isCancelled)) return result;
 
-    result.groups = groupByHash(files, onProgress, isCancelled);
+    result.groups = groupByHash(files, onProgress, isCancelled, result);
     if (shouldCancel(isCancelled)) {
         result.groups.clear();
         result.totalDup = 0;

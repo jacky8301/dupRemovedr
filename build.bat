@@ -52,10 +52,10 @@ if errorlevel 1 (
 echo [5/5] Linking dupRemover.exe...
 cl build\main.obj build\md5.obj build\scanner.obj build\resource.res ^
     /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS ^
-    advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib >nul 2>&1
+    advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Link failed
-    cl build\main.obj build\md5.obj build\scanner.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib
+    cl build\main.obj build\md5.obj build\scanner.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib
     pause & exit /b 1
 )
 

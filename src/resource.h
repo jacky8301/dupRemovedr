@@ -16,3 +16,13 @@
 #define IDC_BROWSE_BTN      109
 #define IDC_SCAN_BTN        111
 #define IDC_MENU_STATUS     112
+#define IDC_TITLE           113
+#define IDC_SUBTITLE        114
+#define IDC_FILES_LABEL     115
+#define IDC_FILES_VALUE     116
+#define IDC_DUP_LABEL       117
+#define IDC_DUP_VALUE       118
+#define IDC_SPACE_LABEL     119
+#define IDC_SPACE_VALUE     120
+#define IDC_RESULTS_LABEL   121
+#define IDC_HINT            122

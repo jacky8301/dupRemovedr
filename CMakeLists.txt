@@ -48,6 +48,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ole32
     user32
     gdi32
+    uxtheme
 )
 
 # Set output directory
@@ -78,10 +79,21 @@ if(BUILD_TESTING)
     target_link_libraries(test_scanner PRIVATE dupRemoverCore)
     add_test(NAME scanner COMMAND test_scanner)
 
+    # 性能基准单独运行，避免常规测试生成大体积数据。
+    add_executable(benchmark_scanner EXCLUDE_FROM_ALL test/benchmark_scanner.cpp)
+    target_link_libraries(benchmark_scanner PRIVATE dupRemoverCore)
+
+    # 隐藏窗口视觉检查需要先准备性能基准数据集。
+    add_executable(test_ui EXCLUDE_FROM_ALL test/test_ui.cpp ${RESOURCES})
+    target_link_libraries(test_ui PRIVATE dupRemoverCore
+        advapi32 comctl32 shell32 ole32 user32 gdi32 uxtheme gdiplus)
+
     if(MSVC)
         target_compile_options(test_md5_vectors PRIVATE /W4 /utf-8)
         target_compile_options(test_scanner PRIVATE /W4 /utf-8)
-        set_target_properties(test_md5_vectors test_scanner PROPERTIES
+        target_compile_options(benchmark_scanner PRIVATE /W4 /utf-8)
+        target_compile_options(test_ui PRIVATE /W4 /utf-8)
+        set_target_properties(test_md5_vectors test_scanner benchmark_scanner test_ui PROPERTIES
             MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
         )
     endif()
