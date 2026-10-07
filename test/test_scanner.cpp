@@ -337,6 +337,30 @@ bool testSmallBatchStaysSerial() {
                   "small batches avoid parallel thread overhead");
 }
 
+bool testDirectoryErrorsAndAbsolutePaths() {
+    TempDir temp;
+    bool ok = expect(DuplicateScanner().scan(temp.path.wstring()).totalFiles == 0,
+                     "Empty directories are successful scans");
+    writeFile(temp.path / L"a.bin", "same");
+    writeFile(temp.path / L"b.bin", "same");
+    for (const auto& path : {temp.path / L"missing", temp.path / L"a.bin"}) {
+        bool failed = false;
+        try { DuplicateScanner().scan(path.wstring()); }
+        catch (const ScanError& error) { failed = error.path == path.wstring() && error.code != 0; }
+        ok &= expect(failed, "Missing directories and file roots must report scan failure");
+    }
+    // 固定工作目录后传入相对路径，验证结果可以安全交给回收站 API。
+    const auto previous = fs::current_path();
+    fs::current_path(temp.path.parent_path());
+    const auto result = DuplicateScanner().scan(temp.path.filename().wstring());
+    fs::current_path(previous);
+    ok &= expect(result.totalDup == 1, "Relative scan finds duplicates");
+    for (const auto& group : result.groups)
+        for (const auto& path : group.files)
+            ok &= expect(fs::path(path).is_absolute(), "Scan results always contain absolute paths");
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -348,6 +372,7 @@ int main() {
     ok &= testReadFailuresAndCancellation();
     ok &= testParallelHashingAndCallbacks();
     ok &= testSmallBatchStaysSerial();
+    ok &= testDirectoryErrorsAndAbsolutePaths();
 
     std::printf("=== scanner tests %s ===\n", ok ? "passed" : "failed");
     return ok ? 0 : 1;

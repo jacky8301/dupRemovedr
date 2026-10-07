@@ -11,6 +11,7 @@
 #include <exception>
 #include <mutex>
 #include <thread>
+#include <filesystem>
 
 using ScanClock = std::chrono::steady_clock;
 
@@ -161,16 +162,29 @@ DuplicateScanner::enumerateFiles(const std::wstring& folder,
         std::wstring currentDir = dirs.back();
         dirs.pop_back();
 
+        const DWORD attributes = GetFileAttributesW(currentDir.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) throw ScanError(currentDir, GetLastError());
+        if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) throw ScanError(currentDir, ERROR_DIRECTORY);
+
         std::wstring pattern = buildFindPattern(currentDir);
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd,
             FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
         if (hFind == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER)
             hFind = FindFirstFileW(pattern.c_str(), &fd);
-        if (hFind == INVALID_HANDLE_VALUE) continue;
+        if (hFind == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            // 有效的空目录可能没有任何匹配项，其他错误必须向调用方报告。
+            if (error == ERROR_FILE_NOT_FOUND) continue;
+            throw ScanError(currentDir, error);
+        }
+        struct FindHandle {
+            HANDLE value;
+            ~FindHandle() { FindClose(value); }
+        } findHandle{hFind};
 
         do {
-            if (shouldCancel(isCancelled)) break;
+            if (shouldCancel(isCancelled)) return result;
 
             if (wcscmp(fd.cFileName, L".")  == 0 ||
                 wcscmp(fd.cFileName, L"..") == 0)
@@ -193,7 +207,8 @@ DuplicateScanner::enumerateFiles(const std::wstring& folder,
                 result.emplace_back(fullPath, size.QuadPart);
             }
         } while (FindNextFileW(hFind, &fd));
-        FindClose(hFind);
+        const DWORD error = GetLastError();
+        if (error != ERROR_NO_MORE_FILES) throw ScanError(currentDir, error);
     }
     return result;
 }
@@ -275,14 +290,19 @@ ScanResult DuplicateScanner::scan(const std::wstring& folder,
                                    ProgressFn onProgress,
                                    CancelFn isCancelled, unsigned maxHashWorkers) {
     ScanResult result;
+    if (shouldCancel(isCancelled)) return result;
+    if (folder.empty()) throw ScanError(folder, ERROR_INVALID_NAME);
+    std::error_code error;
+    const auto absoluteFolder = std::filesystem::absolute(folder, error).lexically_normal().wstring();
+    if (error) throw ScanError(folder, static_cast<uint32_t>(error.value()));
     const auto enumerateStart = ScanClock::now();
-    auto files = enumerateFiles(folder, isCancelled);
+    auto files = enumerateFiles(absoluteFolder, isCancelled);
     result.enumerateMilliseconds = elapsedMilliseconds(enumerateStart);
     result.totalFiles = static_cast<int>(files.size());
     if (shouldCancel(isCancelled)) return result;
 
     result.groups = groupByHash(files, onProgress, isCancelled, result,
-        files.empty() ? 1 : hashWorkerLimit(folder, maxHashWorkers));
+        files.empty() ? 1 : hashWorkerLimit(absoluteFolder, maxHashWorkers));
     if (shouldCancel(isCancelled)) {
         result.groups.clear();
         result.totalDup = 0;

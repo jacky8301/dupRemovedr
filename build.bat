@@ -17,7 +17,7 @@ if not exist "build\tests" mkdir build\tests
 
 set CFLAGS=/c /O2 /EHsc /utf-8 /MD /std:c++17 /DUNICODE /D_UNICODE
 
-echo [1/5] Compiling md5.cpp...
+echo [1/6] Compiling md5.cpp...
 cl %CFLAGS% src\md5.cpp /Fo:build\md5.obj >nul 2>&1
 if errorlevel 1 (
     echo ERROR: md5.cpp failed
@@ -25,7 +25,7 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-echo [2/5] Compiling scanner.cpp...
+echo [2/6] Compiling scanner.cpp...
 cl %CFLAGS% src\scanner.cpp /Fo:build\scanner.obj >nul 2>&1
 if errorlevel 1 (
     echo ERROR: scanner.cpp failed
@@ -33,7 +33,14 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-echo [3/5] Compiling resource.rc...
+echo [3/6] Compiling image_preview.cpp...
+cl %CFLAGS% src\image_preview.cpp /Fo:build\image_preview.obj
+if errorlevel 1 (
+    echo ERROR: image_preview.cpp failed
+    pause & exit /b 1
+)
+
+echo [4/6] Compiling resource.rc...
 rc /i src /fo build\resource.res src\resource.rc >nul 2>&1
 if errorlevel 1 (
     echo ERROR: resource.rc failed
@@ -41,7 +48,7 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-echo [4/5] Compiling main.cpp...
+echo [5/6] Compiling main.cpp...
 cl %CFLAGS% src\main.cpp /Fo:build\main.obj >nul 2>&1
 if errorlevel 1 (
     echo ERROR: main.cpp failed
@@ -49,13 +56,13 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-echo [5/5] Linking dupRemover.exe...
-cl build\main.obj build\md5.obj build\scanner.obj build\resource.res ^
+echo [6/6] Linking dupRemover.exe...
+cl build\main.obj build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res ^
     /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS ^
-    advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib >nul 2>&1
+    advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib windowscodecs.lib >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Link failed
-    cl build\main.obj build\md5.obj build\scanner.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib
+    cl build\main.obj build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib windowscodecs.lib
     pause & exit /b 1
 )
 

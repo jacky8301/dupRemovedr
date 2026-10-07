@@ -13,7 +13,7 @@ CAPTION "重复文件清理"
 FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
 BEGIN
     LTEXT "重复文件清理", IDC_TITLE, 0, 0, 1, 1
-    LTEXT "找出重复副本，让文件夹更清爽", IDC_SUBTITLE, 0, 0, 1, 1
+    LTEXT "选择目录 → 扫描比对 → 预览确认 → 清理副本", IDC_SUBTITLE, 0, 0, 1, 1
     CONTROL "请选择扫描目录", IDC_FOLDER_PATH, "Static", SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
     CONTROL "选择文件夹", IDC_BROWSE_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
     CONTROL "开始扫描", IDC_SCAN_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
@@ -26,8 +26,15 @@ BEGIN
     LTEXT "可释放空间", IDC_SPACE_LABEL, 0, 0, 1, 1
     LTEXT "—", IDC_SPACE_VALUE, 0, 0, 1, 1
     LTEXT "扫描结果", IDC_RESULTS_LABEL, 0, 0, 1, 1
-    LTEXT "绿色保留 · 红色为重复副本 · 清理后移入回收站", IDC_HINT, 0, 0, 1, 1
-    CONTROL "", IDC_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1
+    LTEXT "单击预览 · 双击定位 · 绿色保留", IDC_HINT, 0, 0, 1, 1
+    CONTROL "", IDC_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 1, 1
+    LTEXT "文件预览", IDC_PREVIEW_TITLE, 0, 0, 1, 1
+    CONTROL "", IDC_PREVIEW_IMAGE, "Static", SS_OWNERDRAW | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    CONTROL "尚未选择文件", IDC_PREVIEW_NAME, "Static", SS_ENDELLIPSIS | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    LTEXT "单击左侧结果查看详情", IDC_PREVIEW_INFO, 0, 0, 1, 1
+    CONTROL "", IDC_PREVIEW_PATH, "Static", SS_PATHELLIPSIS | WS_CHILD | WS_VISIBLE, 0, 0, 1, 1
+    CONTROL "定位文件", IDC_REVEAL_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP | WS_DISABLED, 0, 0, 1, 1
+    LTEXT "图片按比例显示 · 动图预览首帧", IDC_PREVIEW_NOTE, 0, 0, 1, 1
     LTEXT "", IDC_MENU_STATUS, 0, 0, 1, 1
     CONTROL "添加右键菜单", IDC_INSTALL_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1
     CONTROL "移除右键菜单", IDC_UNINSTALL_BTN, "Button", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 1, 1

@@ -4,6 +4,15 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <stdexcept>
+
+// 枚举失败携带目录和系统错误码，调用方不得把不完整结果当成扫描成功。
+struct ScanError : std::runtime_error {
+    std::wstring path;
+    uint32_t code;
+    ScanError(const std::wstring& failedPath, uint32_t errorCode)
+        : std::runtime_error("目录扫描失败"), path(failedPath), code(errorCode) {}
+};
 
 /// A group of files that share the same MD5 hash.
 struct DuplicateGroup {
@@ -35,6 +44,7 @@ public:
 
     /// maxHashWorkers 为 0 时自动检测磁盘，为 1 时串行，其他值最多使用 4 个线程。
     /// 进度与取消回调均在调用线程执行，不要求回调自身支持并发。
+    /// 返回绝对文件路径；目录无法完整枚举时抛出 ScanError。
     ScanResult scan(const std::wstring& folder, ProgressFn onProgress = {},
                     CancelFn isCancelled = {}, unsigned maxHashWorkers = 0);
 

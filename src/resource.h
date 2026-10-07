@@ -26,3 +26,10 @@
 #define IDC_SPACE_VALUE     120
 #define IDC_RESULTS_LABEL   121
 #define IDC_HINT            122
+#define IDC_PREVIEW_TITLE   123
+#define IDC_PREVIEW_IMAGE   124
+#define IDC_PREVIEW_NAME    125
+#define IDC_PREVIEW_INFO    126
+#define IDC_PREVIEW_PATH    127
+#define IDC_REVEAL_BTN      128
+#define IDC_PREVIEW_NOTE    129
