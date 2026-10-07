@@ -8,6 +8,9 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <stdexcept>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -228,6 +231,112 @@ bool testReadFailuresAndCancellation() {
     return ok;
 }
 
+bool sameGroups(const ScanResult& left, const ScanResult& right) {
+    if (left.totalFiles != right.totalFiles || left.totalDup != right.totalDup ||
+        left.wastedBytes != right.wastedBytes || left.groups.size() != right.groups.size())
+        return false;
+    for (size_t i = 0; i < left.groups.size(); ++i) {
+        if (left.groups[i].md5 != right.groups[i].md5 ||
+            left.groups[i].fileSize != right.groups[i].fileSize ||
+            left.groups[i].files != right.groups[i].files)
+            return false;
+    }
+    return true;
+}
+
+bool filesAreClosed(const fs::path& folder) {
+    for (const auto& entry : fs::directory_iterator(folder)) {
+        HANDLE file = CreateFileW(entry.path().c_str(), GENERIC_READ | GENERIC_WRITE,
+            0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        CloseHandle(file);
+    }
+    return true;
+}
+
+bool testParallelHashingAndCallbacks() {
+    TempDir temp;
+    std::string contents(2 * 1024 * 1024, 'A');
+    for (int i = 0; i < 8; ++i) {
+        // 两组文件采样相同，只有完整校验才能把它们正确分开。
+        contents[8192] = i < 6 ? 'A' : 'B';
+        writeFile(temp.path / (std::to_wstring(i) + L".bin"), contents);
+    }
+    auto serial = DuplicateScanner().scan(temp.path.wstring(), {}, {}, 1);
+    const auto caller = std::this_thread::get_id();
+    std::atomic<bool> callbacksOnCaller{true};
+    int previous = 0;
+    bool progressOk = true;
+    auto parallel = DuplicateScanner().scan(temp.path.wstring(),
+        [&](int current, int total, const std::wstring&) {
+            if (std::this_thread::get_id() != caller) {
+                callbacksOnCaller.store(false);
+                return;
+            }
+            progressOk &= current == previous + 1 && total == 8;
+            previous = current;
+        }, [&] {
+            if (std::this_thread::get_id() != caller) callbacksOnCaller.store(false);
+            return false;
+        }, 64);
+    bool ok = expect(sameGroups(serial, parallel) && parallel.groups.size() == 2 &&
+                     parallel.totalDup == 6, "parallel hashes preserve groups, totals, MD5 and kept-file order");
+    const unsigned expectedWorkers = (std::min)(4u,
+        (std::max)(1u, std::thread::hardware_concurrency()));
+    ok &= expect(serial.hashWorkers == 1 && parallel.hashWorkers == expectedWorkers,
+                 "explicit serial mode and bounded parallel mode are honored");
+    ok &= expect(parallel.hashedFiles == 8 && parallel.sampledFiles == 8,
+                 "parallel statistics count each file exactly once");
+    ok &= expect(callbacksOnCaller.load() && progressOk && previous == 8,
+                 "callbacks stay on the caller thread with monotonic complete progress");
+    ok &= expect(filesAreClosed(temp.path), "parallel success releases every file handle");
+
+    bool cancelled = false;
+    int progressCalls = 0;
+    auto stopped = DuplicateScanner().scan(temp.path.wstring(),
+        [&](int, int, const std::wstring&) { ++progressCalls; cancelled = true; },
+        [&] { return cancelled; }, 4);
+    ok &= expect(cancelled && progressCalls == 1 && stopped.groups.empty() &&
+                 stopped.totalDup == 0 && stopped.wastedBytes == 0,
+                 "parallel cancellation discards partial results and stops progress");
+    ok &= expect(filesAreClosed(temp.path), "parallel cancellation joins workers and closes files");
+
+    bool caught = false;
+    try {
+        DuplicateScanner().scan(temp.path.wstring(),
+            [](int, int, const std::wstring&) { throw std::runtime_error("progress callback"); }, {}, 4);
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    ok &= expect(caught && filesAreClosed(temp.path),
+                 "throwing progress callbacks join workers before propagating the exception");
+
+    bool throwOnCancel = false;
+    caught = false;
+    try {
+        DuplicateScanner().scan(temp.path.wstring(),
+            [&](int, int, const std::wstring&) { throwOnCancel = true; },
+            [&]() -> bool {
+                if (throwOnCancel) throw std::runtime_error("cancel callback");
+                return false;
+            }, 4);
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    ok &= expect(caught && filesAreClosed(temp.path),
+                 "throwing cancel callbacks also join workers and close files");
+    return ok;
+}
+
+bool testSmallBatchStaysSerial() {
+    TempDir temp;
+    writeFile(temp.path / L"a.bin", std::string(65536, 'A'));
+    writeFile(temp.path / L"b.bin", std::string(65536, 'A'));
+    const auto result = DuplicateScanner().scan(temp.path.wstring(), {}, {}, 4);
+    return expect(result.hashWorkers == 1 && result.totalDup == 1,
+                  "small batches avoid parallel thread overhead");
+}
+
 } // namespace
 
 int main() {
@@ -237,6 +346,8 @@ int main() {
     ok &= testSizeAndSampleFiltering();
     ok &= testSampleBoundaries();
     ok &= testReadFailuresAndCancellation();
+    ok &= testParallelHashingAndCallbacks();
+    ok &= testSmallBatchStaysSerial();
 
     std::printf("=== scanner tests %s ===\n", ok ? "passed" : "failed");
     return ok ? 0 : 1;

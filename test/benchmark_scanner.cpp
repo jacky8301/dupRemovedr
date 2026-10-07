@@ -6,10 +6,12 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <cstdlib>
 
 // 使用固定数据集比较扫描实现；此程序只在显式运行时生成测试文件。
 int main(int argc, char* argv[]) {
-    if (argc != 2) return 1;
+    if (argc < 2 || argc > 3) return 1;
+    const unsigned workers = argc == 3 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 0;
     const auto root = std::filesystem::absolute(argv[1]);
     std::filesystem::create_directories(root);
     for (int i = 0; i < 80; ++i) {
@@ -28,12 +30,13 @@ int main(int argc, char* argv[]) {
     for (int run = 0; run < 3; ++run) {
         DuplicateScanner scanner;
         const auto start = std::chrono::steady_clock::now();
-        const auto result = scanner.scan(root.wstring());
+        const auto result = scanner.scan(root.wstring(), {}, {}, workers);
         const auto elapsed = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - start).count();
-        std::printf("run=%d files=%d groups=%zu duplicates=%d sampled=%d full_hashes=%d milliseconds=%.2f\n",
+        std::printf("run=%d files=%d groups=%zu duplicates=%d sampled=%d full_hashes=%d workers=%u milliseconds=%.2f enumerate_ms=%.2f sample_ms=%.2f hash_ms=%.2f\n",
                     run + 1, result.totalFiles, result.groups.size(),
-                    result.totalDup, result.sampledFiles, result.hashedFiles, elapsed);
+                    result.totalDup, result.sampledFiles, result.hashedFiles, result.hashWorkers, elapsed,
+                    result.enumerateMilliseconds, result.sampleMilliseconds, result.hashMilliseconds);
         if (result.totalFiles != 80 || result.groups.size() != 1 || result.totalDup != 7)
             return 2;
     }
