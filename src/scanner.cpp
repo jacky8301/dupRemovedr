@@ -196,6 +196,8 @@ DuplicateScanner::enumerateFiles(const std::wstring& folder,
             fullPath += fd.cFileName;
 
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                // 失败或中断后留下的暂存副本需要人工恢复，不能再次当作重复文件清理。
+                if (std::wstring(fd.cFileName).find(L".dupRemover-staging-") == 0) continue;
                 // 不递归目录联接和符号链接，避免循环及重复遍历。
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
                     dirs.push_back(fullPath);

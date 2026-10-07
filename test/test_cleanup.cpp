@@ -44,7 +44,12 @@ static int WINAPI fakeShellOperation(LPSHFILEOPSTRUCTW operation) {
     if (throwError) throw std::runtime_error("模拟回收站异常");
     recycledPaths.push_back(operation->pFrom);
     operation->fAnyOperationsAborted = FALSE;
-    return failSome && recycledPaths.size() % 3 == 0 ? 1 : 0;
+    if (failSome && recycledPaths.size() % 3 == 0) return 1;
+    // 替身将暂存样本放回原位置，保持批量界面测试重复使用同一份样本的约定。
+    const auto original = fixtureRoot / L"duplicate.bin";
+    if (std::filesystem::path(operation->pFrom) != original &&
+        !MoveFileExW(operation->pFrom, original.c_str(), 0)) return 1;
+    return 0;
 }
 
 #define SHFileOperationW fakeShellOperation

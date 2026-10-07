@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <mutex>
 #include <stdexcept>
+#include <cstring>
+#include <cstddef>
 #include <uxtheme.h>
 
 #pragma comment(lib, "comctl32.lib")
@@ -48,6 +50,7 @@ struct CleanupTask {
 struct CleanupOutcome {
     size_t row;
     bool recycled;
+    std::wstring recoveryPath;
 };
 
 // 工作线程只发布结果，由界面线程分批更新控件和扫描统计。
@@ -75,6 +78,7 @@ struct DlgData {
     size_t          cleanupApplied = 0;
     size_t          cleanupSucceeded = 0;
     size_t          cleanupFailed = 0;
+    std::wstring    cleanupRecoveryPath;
     std::atomic_bool cancelled = false;
     std::mutex      progressMutex;
     std::wstring    currentFile;
@@ -719,29 +723,147 @@ static bool recycleFile(const std::wstring& path) {
     SHFILEOPSTRUCTW f = {};
     f.wFunc  = FO_DELETE;
     f.pFrom  = buf.c_str();
-    f.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION
+    f.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NO_CONNECTED_ELEMENTS
              | FOF_NOERRORUI  | FOF_SILENT;
     return SHFileOperationW(&f) == 0 && !f.fAnyOperationsAborted;
 }
 
-static bool recycleVerifiedDuplicate(const CleanupTask& task, const std::atomic_bool& cancelled) {
-    if (cancelled.load()) return false;
-    // 复核及回收期间锁住保留文件，禁止写入、重命名和删除。
-    // 副本允许删除共享以供 Shell 回收，但禁止其他进程写入内容。
-    struct FileHandle {
-        HANDLE value;
-        ~FileHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
-    } kept{CreateFileW(task.keptPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, 0, nullptr)},
-      duplicate{CreateFileW(task.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, 0, nullptr)};
+struct CleanupFileHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    explicit CleanupFileHandle(HANDLE handle = INVALID_HANDLE_VALUE) : value(handle) {}
+    CleanupFileHandle(const CleanupFileHandle&) = delete;
+    CleanupFileHandle& operator=(const CleanupFileHandle&) = delete;
+    void reset(HANDLE handle = INVALID_HANDLE_VALUE) {
+        if (value != INVALID_HANDLE_VALUE) CloseHandle(value);
+        value = handle;
+    }
+    ~CleanupFileHandle() { reset(); }
+};
+
+static std::vector<BYTE> renameInformation(const std::wstring& destination) {
+    const DWORD bytes = static_cast<DWORD>(destination.size() * sizeof(wchar_t));
+    std::vector<BYTE> buffer(offsetof(FILE_RENAME_INFO, FileName) + bytes + sizeof(wchar_t), 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    // 不允许覆盖目标；恢复原位时，新出现的文件必须保留。
+    info->ReplaceIfExists = FALSE;
+    info->FileNameLength = bytes;
+    std::memcpy(info->FileName, destination.c_str(), bytes);
+    return buffer;
+}
+
+static bool renameOpenFile(HANDLE file, std::vector<BYTE>& information) {
+    return SetFileInformationByHandle(file, FileRenameInfo, information.data(),
+        static_cast<DWORD>(information.size())) != FALSE;
+}
+
+static std::wstring cleanupFilePath(HANDLE file) {
+    const DWORD length = GetFinalPathNameByHandleW(file, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (!length) return {};
+    std::wstring path(length, L'\0');
+    const DWORD written = GetFinalPathNameByHandleW(file, path.data(), length,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (!written || written >= length) return {};
+    path.resize(written);
+    if (path.compare(0, 8, L"\\\\?\\UNC\\") == 0) path = L"\\\\" + path.substr(8);
+    else if (path.compare(0, 4, L"\\\\?\\") == 0) path.erase(0, 4);
+    return std::filesystem::path(path).is_absolute() ? path : std::wstring{};
+}
+
+// 暂存目录与源文件同盘，保留原文件名。退出时只移除空目录，绝不递归清理。
+struct CleanupStage {
+    std::wstring directory;
+    std::wstring path;
+    CleanupFileHandle parentLock;
+    CleanupFileHandle directoryLock;
+
+    bool prepare(const std::wstring& original) {
+        const auto parent = std::filesystem::path(original).parent_path();
+        parentLock.reset(CreateFileW(parent.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (parentLock.value == INVALID_HANDLE_VALUE) return false;
+        GUID id{};
+        wchar_t text[40]{};
+        if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(id, text, static_cast<int>(std::size(text)))) return false;
+        const auto candidate = parent / (std::wstring(L".dupRemover-staging-") + text);
+        path = (candidate / std::filesystem::path(original).filename()).wstring();
+        // 旧 Shell API 不支持扩展长度路径，不能移动后才发现无法回收。
+        if (path.size() >= MAX_PATH) return false;
+        const auto candidateName = candidate.wstring();
+        if (!CreateDirectoryW(candidateName.c_str(), nullptr)) return false;
+        directory = candidateName;
+        directoryLock.reset(CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (directoryLock.value == INVALID_HANDLE_VALUE) return false;
+        BY_HANDLE_FILE_INFORMATION info{};
+        return GetFileInformationByHandle(directoryLock.value, &info) &&
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+    }
+
+    ~CleanupStage() {
+        directoryLock.reset();
+        if (!directory.empty()) RemoveDirectoryW(directory.c_str());
+    }
+};
+
+static bool recycleVerifiedDuplicate(const CleanupTask& task, const std::atomic_bool& cancelled,
+                                     std::wstring* recoveryPath = nullptr) {
+    if (recoveryPath) recoveryPath->clear();
+    if (cancelled.load() || !std::filesystem::path(task.path).is_absolute() ||
+        !std::filesystem::path(task.keptPath).is_absolute()) return false;
+    // 直到副本进入独立暂存目录，两个文件都不允许其他进程写入或替换。
+    CleanupFileHandle kept{CreateFileW(task.keptPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)},
+      duplicate{CreateFileW(task.path.c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
     if (kept.value == INVALID_HANDLE_VALUE || duplicate.value == INVALID_HANDLE_VALUE) return false;
+    for (HANDLE file : {kept.value, duplicate.value}) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(file, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return false;
+    }
     const auto checkCancelled = [&] { return cancelled.load(); };
     if (task.expectedHash.empty() ||
-        MD5::hashFile(task.keptPath, checkCancelled, task.expectedSize) != task.expectedHash ||
-        MD5::hashFile(task.path, checkCancelled, task.expectedSize) != task.expectedHash ||
+        MD5::hashOpenFile(kept.value, checkCancelled, task.expectedSize) != task.expectedHash ||
+        MD5::hashOpenFile(duplicate.value, checkCancelled, task.expectedSize) != task.expectedHash ||
         cancelled.load()) return false;
-    return recycleFile(task.path);
+    const auto original = cleanupFilePath(duplicate.value);
+    if (original.empty()) return false;
+    CleanupStage stage;
+    if (!stage.prepare(original)) return false;
+    auto toStage = renameInformation(stage.path);
+    auto toOriginal = renameInformation(original);
+    // 所有可能分配内存的准备工作都在移动之前完成。
+    if (recoveryPath) *recoveryPath = stage.path;
+    if (cancelled.load() || !renameOpenFile(duplicate.value, toStage)) {
+        if (recoveryPath) recoveryPath->clear();
+        return false;
+    }
+    bool recycled = false;
+    std::exception_ptr failure;
+    try {
+        // ReOpenFile 绑定同一文件对象；仅在隔离原路径后才允许 Shell 重命名它。
+        HANDLE shared = ReOpenFile(duplicate.value, GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_FLAG_SEQUENTIAL_SCAN);
+        if (shared != INVALID_HANDLE_VALUE) {
+            duplicate.reset(shared);
+            if (!cancelled.load()) recycled = recycleFile(stage.path);
+        }
+    } catch (...) { failure = std::current_exception(); }
+    if (recycled) {
+        if (recoveryPath) recoveryPath->clear();
+    } else {
+        // 按仍持有的对象句柄恢复，不能按可能已变化的暂存路径重新找文件。
+        CleanupFileHandle restore{ReOpenFile(duplicate.value, GENERIC_READ | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE, 0)};
+        const bool restored = restore.value != INVALID_HANDLE_VALUE
+            ? renameOpenFile(restore.value, toOriginal) : renameOpenFile(duplicate.value, toOriginal);
+        if (restored && recoveryPath) recoveryPath->clear();
+    }
+    // 先关闭文件句柄，再由 stage 析构尝试移除空目录。
+    duplicate.reset();
+    if (failure) std::rethrow_exception(failure);
+    return recycled;
 }
 
 static void cleanupThread(DlgData* d, std::vector<CleanupTask> tasks) {
@@ -755,10 +877,14 @@ static void cleanupThread(DlgData* d, std::vector<CleanupTask> tasks) {
                 std::lock_guard<std::mutex> lock(d->cleanup.mutex);
                 d->cleanup.file = task.path;
             }
-            const bool recycled = recycleVerifiedDuplicate(task, d->cancelled);
-            if (!recycled && d->cancelled.load()) break;
+            std::wstring recoveryPath;
+            bool recycled = false;
+            try { recycled = recycleVerifiedDuplicate(task, d->cancelled, &recoveryPath); }
+            catch (...) { failed = true; }
+            if (!recycled && d->cancelled.load() && recoveryPath.empty()) break;
             std::lock_guard<std::mutex> lock(d->cleanup.mutex);
-            d->cleanup.outcomes.push_back({task.row, recycled});
+            d->cleanup.outcomes.push_back({task.row, recycled, std::move(recoveryPath)});
+            if (failed) break;
         }
     } catch (...) {
         failed = true;
@@ -801,10 +927,19 @@ static void refreshCleanup(HWND hDlg, DlgData& d) {
             d.result.wastedBytes -= d.result.groups[ref.g].fileSize;
         } else {
             ++d.cleanupFailed;
+            if (!batch[i].recoveryPath.empty()) {
+                d.cleanupRecoveryPath = batch[i].recoveryPath;
+                // 更新实际位置，用户可以从结果列表定位未能恢复原位的副本。
+                d.result.groups[ref.g].files[ref.f] = batch[i].recoveryPath;
+                auto folder = std::filesystem::path(batch[i].recoveryPath).parent_path().wstring();
+                ListView_SetItemText(list, static_cast<int>(batch[i].row), 2, folder.data());
+            }
         }
         ListView_SetItemText(list, static_cast<int>(batch[i].row), 0,
-            const_cast<wchar_t*>(batch[i].recycled ? L"已回收" : L"清理失败"));
-        if (batch[i].recycled && static_cast<int>(batch[i].row) == d.previewRow)
+            const_cast<wchar_t*>(batch[i].recycled ? L"已回收" :
+                batch[i].recoveryPath.empty() ? L"清理失败" : L"已暂存"));
+        if ((batch[i].recycled || !batch[i].recoveryPath.empty()) &&
+            static_cast<int>(batch[i].row) == d.previewRow)
             selectPreview(hDlg, d, d.previewRow);
     }
     if (count) {
@@ -827,7 +962,8 @@ static void refreshCleanup(HWND hDlg, DlgData& d) {
     d.cleaning = false;
     const wchar_t* status = failed ? L"清理中断 · " :
         d.cleanupApplied < d.cleanupTotal ? L"清理已停止 · " : L"清理完成 · ";
-    SetDlgItemTextW(hDlg, IDC_STATUS, (status + counts).c_str());
+    SetDlgItemTextW(hDlg, IDC_STATUS, (status + counts + (d.cleanupRecoveryPath.empty()
+        ? L"" : L" · 未覆盖原位置的新文件，副本保存在：" + d.cleanupRecoveryPath)).c_str());
     updateScanControls(hDlg, &d);
     if (d.closeAfterWork) requestClose(hDlg, &d);
 }
@@ -853,6 +989,7 @@ static void startCleanup(HWND hDlg, DlgData& d) {
         d.cleanup.failed = false;
         d.cleanupTotal = tasks.size();
         d.cleanupApplied = d.cleanupSucceeded = d.cleanupFailed = 0;
+        d.cleanupRecoveryPath.clear();
         d.cancelled.store(false);
         d.cleaning = true;
         setProgressMarquee(hDlg, false);
@@ -1168,7 +1305,9 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
             {
                 int ret = MessageBoxW(hDlg,
                     L"将所有重复副本移入回收站？\n"
-                    L"每组保留一份文件，其余副本移入回收站。",
+                    L"每组保留一份文件，其余副本移入回收站。\n\n"
+                    L"若从回收站还原，文件将位于原目录下的 .dupRemover-staging-* 子目录，"
+                    L"请再将文件移回原目录。",
                     L"确认清理", MB_OKCANCEL | MB_ICONWARNING);
                 if (ret != IDOK) break;
 

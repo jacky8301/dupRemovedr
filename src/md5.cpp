@@ -201,8 +201,18 @@ std::string MD5::hashFile(const std::wstring& filepath,
         FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
     if (file.value == INVALID_HANDLE_VALUE) return {};
+    return hashOpenFile(file.value, isCancelled, expectedSize);
+}
+
+std::string MD5::hashOpenFile(void* fileHandle,
+                             const std::function<bool()>& isCancelled,
+                             uint64_t expectedSize) {
+    if (cancelled(isCancelled)) return {};
+    HANDLE file = static_cast<HANDLE>(fileHandle);
+    LARGE_INTEGER start{};
+    if (!SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) return {};
     BY_HANDLE_FILE_INFORMATION before{};
-    if (!fileInfo(file.value, expectedSize, before)) return {};
+    if (!fileInfo(file, expectedSize, before)) return {};
 
     MD5 md5;
     // 每个扫描线程复用缓冲区，避免为每个文件重新分配和清零。
@@ -212,11 +222,11 @@ std::string MD5::hashFile(const std::wstring& filepath,
         if (cancelled(isCancelled)) return {};
         DWORD bytesRead = 0;
         // 直接检查 ReadFile 的返回值，成功读取不依赖残留错误码。
-        if (!ReadFile(file.value, buffer.get(), bufferSize, &bytesRead, nullptr)) return {};
+        if (!ReadFile(file, buffer.get(), bufferSize, &bytesRead, nullptr)) return {};
         if (bytesRead == 0) break;
         md5.update(buffer.get(), bytesRead);
     }
-    if (cancelled(isCancelled) || !unchanged(file.value, before)) return {};
+    if (cancelled(isCancelled) || !unchanged(file, before)) return {};
     return toHex(md5.finalize());
 }
 

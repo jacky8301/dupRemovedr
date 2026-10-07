@@ -25,6 +25,12 @@ public:
         const std::function<bool()>& isCancelled = {},
         uint64_t expectedSize = (std::numeric_limits<uint64_t>::max)());
 
+    /// 从已锁定的 Windows 文件句柄读取，避免按路径重新打开不同的文件。
+    /// 从文件开头计算，调用方负责持有及关闭句柄，并禁止并发写入。
+    static std::string hashOpenFile(void* fileHandle,
+        const std::function<bool()>& isCancelled = {},
+        uint64_t expectedSize = (std::numeric_limits<uint64_t>::max)());
+
     /// 采样头部、中部和尾部，仅用于筛选；小文件直接读取完整内容。
     static constexpr uint64_t sampleBytes = 12 * 1024;
     static std::string hashFileSample(const std::wstring& filepath,
