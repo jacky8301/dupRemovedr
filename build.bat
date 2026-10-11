@@ -56,13 +56,24 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+rem 编译独立的界面和清理模块，与 CMake 构建保持一致。
+set APP_MODULES=dialog dialog_view dialog_preview dialog_results dialog_scan dialog_cleanup dialog_commands context_menu cleanup
+for %%m in (%APP_MODULES%) do (
+    cl %CFLAGS% src\%%m.cpp /Fo:build\%%m.obj
+    if errorlevel 1 (
+        echo ERROR: %%m.cpp failed
+        pause & exit /b 1
+    )
+)
+set APP_OBJECTS=build\dialog.obj build\dialog_view.obj build\dialog_preview.obj build\dialog_results.obj build\dialog_scan.obj build\dialog_cleanup.obj build\dialog_commands.obj build\context_menu.obj build\cleanup.obj
+
 echo [6/6] Linking dupRemover.exe...
-cl build\main.obj build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res ^
+cl build\main.obj %APP_OBJECTS% build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res ^
     /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS ^
     advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib windowscodecs.lib >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Link failed
-    cl build\main.obj build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib windowscodecs.lib
+    cl build\main.obj %APP_OBJECTS% build\md5.obj build\scanner.obj build\image_preview.obj build\resource.res /Fe:bin\dupRemover.exe /link /SUBSYSTEM:WINDOWS advapi32.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib uxtheme.lib windowscodecs.lib
     pause & exit /b 1
 )
 

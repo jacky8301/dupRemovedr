@@ -33,3 +33,5 @@
 #define IDC_PREVIEW_PATH    127
 #define IDC_REVEAL_BTN      128
 #define IDC_PREVIEW_NOTE    129
+#define IDC_SEARCH_EDIT     130
+#define IDC_SEARCH_CLEAR    131

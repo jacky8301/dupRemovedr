@@ -1,3 +1,4 @@
+#include "test_support.h"
 // 仅操作本次创建的独立样本，使用真实 Shell 验证回收边界。
 #include <windows.h>
 #include <shellapi.h>
@@ -54,15 +55,9 @@ static int WINAPI checkedShellOperation(LPSHFILEOPSTRUCTW operation) {
     return SHFileOperationW(operation);
 }
 
-#define SHFileOperationW checkedShellOperation
-#define SetFileInformationByHandle checkedSetInformation
-#define ReOpenFile checkedReopen
-#define wWinMain applicationEntry
-#include "../src/main.cpp"
-#undef wWinMain
-#undef SHFileOperationW
-#undef SetFileInformationByHandle
-#undef ReOpenFile
+#include "../src/cleanup.h"
+#include "../src/md5.h"
+#include "../src/scanner.h"
 
 static void write(const fs::path& path, const std::string& contents) {
     std::ofstream file(path, std::ios::binary);
@@ -75,17 +70,13 @@ static std::string read(const fs::path& path) {
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
-static bool expect(bool condition, const char* message) {
-    std::printf("%s: %s\n", condition ? "PASS" : "FAIL", message);
-    return condition;
-}
-
 int main() {
     const auto root = fs::current_path() /
         (L"cleanup-safety-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     if (!fs::create_directory(root)) return 2;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool ok = true;
+    const CleanupOperations operations{checkedShellOperation, checkedSetInformation, checkedReopen};
     std::atomic_bool cancelled{false};
     cancellationTarget = &cancelled;
     for (int scenario = 0; scenario < 10; ++scenario) {
@@ -109,8 +100,8 @@ int main() {
         const CleanupTask task{0, sourcePath.wstring(), kept.wstring(), MD5::hashFile(kept.wstring()), 17};
         bool recycled = false;
         std::wstring recoveryPath;
-        try { recycled = scenario == 6 ? recycleFile(sourcePath.wstring())
-                : recycleVerifiedDuplicate(task, cancelled, &recoveryPath); }
+        try { recycled = scenario == 6 ? recycleFile(sourcePath.wstring(), operations)
+                : recycleVerifiedDuplicate(task, cancelled, &recoveryPath, operations); }
         catch (const std::runtime_error&) {}
         if (scenario == 0 || scenario == 6) {
             ok &= expect(recycled && !fs::exists(sourcePath) && read(assets / L"unique.txt") == "unique asset",

@@ -1,3 +1,4 @@
+#include "test_support.h"
 // 使用测试生成的图片验证实际解码、透明度、缩放和过期请求处理。
 #include "image_preview.h"
 #include <windows.h>
@@ -6,11 +7,6 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-
-static bool expect(bool condition, const char* message) {
-    std::printf("%s: %s\n", condition ? "PASS" : "FAIL", message);
-    return condition;
-}
 
 static std::unique_ptr<PreviewImage> waitFor(ImagePreview& loader) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);

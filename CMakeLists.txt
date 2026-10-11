@@ -4,10 +4,10 @@ project(dupRemover LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Enable Unicode
+# 启用 Unicode。
 add_definitions(-DUNICODE -D_UNICODE)
 
-# Find Windows SDK
+# 查找 Windows SDK。
 if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
     set(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION "10.0")
 endif()
@@ -31,7 +31,7 @@ target_include_directories(dupRemoverCore PUBLIC
 )
 target_link_libraries(dupRemoverCore PUBLIC windowscodecs ole32)
 
-# Resource file
+# 资源文件。
 set(RESOURCES
     src/resource.rc
 )
@@ -41,10 +41,23 @@ add_executable(${PROJECT_NAME} WIN32
     ${RESOURCES}
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE dupRemoverCore)
-
-# Link Windows libraries
-target_link_libraries(${PROJECT_NAME} PRIVATE
+# 对话框模块独立编译，应用和测试复用同一份实现。
+add_library(dupRemoverApp STATIC
+    src/dialog.cpp
+    src/dialog_view.cpp
+    src/dialog_preview.cpp
+    src/dialog_results.cpp
+    src/dialog_scan.cpp
+    src/dialog_cleanup.cpp
+    src/dialog_commands.cpp
+    src/context_menu.cpp
+    src/cleanup.cpp
+    src/dialog.h
+    src/context_menu.h
+    src/cleanup.h
+)
+target_link_libraries(dupRemoverApp PUBLIC
+    dupRemoverCore
     advapi32
     comctl32
     shell32
@@ -53,20 +66,22 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     gdi32
     uxtheme
 )
+target_link_libraries(${PROJECT_NAME} PRIVATE dupRemoverApp)
 
-# Set output directory
+# 设置输出目录。
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_SOURCE_DIR}/bin"
 )
 
-# Enable common compiler flags for MSVC
+# 设置 MSVC 编译选项。
 if(MSVC)
     target_compile_options(dupRemoverCore PRIVATE /W4 /utf-8)
+    target_compile_options(dupRemoverApp PRIVATE /W4 /utf-8)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /utf-8)
-    # Statically link runtime to avoid requiring VC++ redist
-    set_target_properties(dupRemoverCore ${PROJECT_NAME} PROPERTIES
+    # 静态链接运行库，避免额外安装 VC++ 运行时。
+    set_target_properties(dupRemoverCore dupRemoverApp ${PROJECT_NAME} PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
 endif()
@@ -89,14 +104,12 @@ if(BUILD_TESTING)
 
     # 回收站替身验证后台清理及界面响应，不操作真实文件。
     add_executable(test_cleanup test/test_cleanup.cpp ${RESOURCES})
-    target_link_libraries(test_cleanup PRIVATE dupRemoverCore
-        advapi32 comctl32 shell32 ole32 user32 gdi32 uxtheme)
+    target_link_libraries(test_cleanup PRIVATE dupRemoverApp)
     add_test(NAME cleanup COMMAND test_cleanup)
 
     # 独立样本上的真实回收测试，覆盖关联资源与原路径替换。
     add_executable(test_cleanup_safety test/test_cleanup_safety.cpp ${RESOURCES})
-    target_link_libraries(test_cleanup_safety PRIVATE dupRemoverCore
-        advapi32 comctl32 shell32 ole32 user32 gdi32 uxtheme)
+    target_link_libraries(test_cleanup_safety PRIVATE dupRemoverApp)
     add_test(NAME cleanup_safety COMMAND test_cleanup_safety)
 
     add_executable(test_preview test/test_preview.cpp)
@@ -109,8 +122,7 @@ if(BUILD_TESTING)
 
     # 隐藏窗口视觉检查需要先准备性能基准数据集。
     add_executable(test_ui EXCLUDE_FROM_ALL test/test_ui.cpp ${RESOURCES})
-    target_link_libraries(test_ui PRIVATE dupRemoverCore
-        advapi32 comctl32 shell32 ole32 user32 gdi32 uxtheme gdiplus)
+    target_link_libraries(test_ui PRIVATE dupRemoverApp gdiplus)
 
     if(MSVC)
         target_compile_options(test_md5_vectors PRIVATE /W4 /utf-8)

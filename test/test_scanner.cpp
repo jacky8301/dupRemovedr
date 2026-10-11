@@ -1,3 +1,4 @@
+#include "test_support.h"
 #include "../src/scanner.h"
 #include "../src/md5.h"
 
@@ -38,16 +39,6 @@ void writeFile(const fs::path& path, const std::string& contents) {
     fs::create_directories(path.parent_path());
     std::ofstream file(path, std::ios::binary);
     file.write(contents.data(), static_cast<std::streamsize>(contents.size()));
-}
-
-bool expect(bool condition, const char* message) {
-    if (condition) {
-        std::printf("PASS: %s\n", message);
-        return true;
-    }
-
-    std::printf("FAIL: %s\n", message);
-    return false;
 }
 
 const DuplicateGroup* findGroupBySize(const ScanResult& result, uint64_t size,

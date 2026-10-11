@@ -1,3 +1,4 @@
+#include "test_support.h"
 // 用可控的回收站替身验证清理线程，避免测试触碰用户文件。
 #include <windows.h>
 #include <shellapi.h>
@@ -52,24 +53,9 @@ static int WINAPI fakeShellOperation(LPSHFILEOPSTRUCTW operation) {
     return 0;
 }
 
-#define SHFileOperationW fakeShellOperation
-#define wWinMain applicationEntry
-#include "../src/main.cpp"
-#undef wWinMain
-#undef SHFileOperationW
-
-static bool expect(bool condition, const char* message) {
-    std::printf("%s: %s\n", condition ? "PASS" : "FAIL", message);
-    return condition;
-}
-
-static void pump() {
-    MSG message{};
-    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-}
+#include "../src/dialog.h"
+#include <algorithm>
+#include <chrono>
 
 static std::wstring label(HWND window, int id) {
     wchar_t buffer[512]{};
@@ -78,6 +64,7 @@ static std::wstring label(HWND window, int id) {
 }
 
 static void seed(HWND window, DlgData& state, int count) {
+    state.cleanupOperations.shellOperation = fakeShellOperation;
     state.folder = L"测试目录";
     state.result = {};
     const auto kept = fixtureRoot / L"kept.bin";
@@ -100,10 +87,70 @@ static void seed(HWND window, DlgData& state, int count) {
 static bool finish(DlgData& state) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (state.cleaning && std::chrono::steady_clock::now() < deadline) {
-        pump();
+        pumpMessages();
         Sleep(1);
     }
     return !state.cleaning;
+}
+
+static bool searchScenario(HWND window, DlgData& state) {
+    bool ok = true;
+    HWND list = GetDlgItem(window, IDC_LIST);
+    state.result = {};
+    state.result.groups = {
+        {"a", {L"D:\\照片\\original.jpg", L"D:\\副本\\假期.JPG"}, 10},
+        {"b", {L"D:\\假期\\Report.TXT", L"D:\\副本\\说明.txt"}, 20},
+        {"c", {L"D:\\照片\\Third.jpg", L"D:\\副本\\third-copy.jpg"}, 30}
+    };
+    state.result.totalFiles = 6;
+    state.result.totalDup = 3;
+    state.result.wastedBytes = 60;
+    populateListView(list, state);
+    updateScanControls(window, &state);
+    ListView_SetItemState(list, 3, LVIS_SELECTED, LVIS_SELECTED);
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"report");
+    ok &= expect(ListView_GetItemCount(list) == 2 && state.visibleRows[0] == 3 &&
+        state.previewRow == 0 && state.previewPath == L"D:\\假期\\Report.TXT",
+        "Filename search ignores case and preserves the selected file after row remapping");
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"假期");
+    ok &= expect(ListView_GetItemCount(list) == 2 && state.visibleRows[0] == 0 &&
+        state.visibleRows[1] == 1 && state.previewRow == -1 &&
+        !IsWindowEnabled(GetDlgItem(window, IDC_REVEAL_BTN)),
+        "Matching a Chinese duplicate filename shows the entire group, ignores folder names and resets hidden preview");
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L".jpg");
+    ok &= expect(ListView_GetItemCount(list) == 5 && state.visibleRows[2] == 5 &&
+        state.items[state.visibleRows[2]].g == -1 && state.visibleRows[3] == 6 &&
+        label(window, IDC_HINT).find(L"2 / 3") != std::wstring::npos,
+        "Extension matching shows two complete groups separated by one blank row");
+    ListView_SetItemState(list, 3, LVIS_SELECTED, LVIS_SELECTED);
+    ok &= expect(state.previewPath == L"D:\\照片\\Third.jpg",
+        "Filtered row selection resolves to the correct original group");
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"not-present");
+    ok &= expect(ListView_GetItemCount(list) == 0 && state.previewRow == -1 &&
+        label(window, IDC_HINT).find(L"0 / 3") != std::wstring::npos &&
+        state.result.totalDup == 3 && state.result.wastedBytes == 60,
+        "No matches empties the view without altering scan totals");
+    SendMessageW(window, WM_COMMAND, IDC_SEARCH_CLEAR, 0);
+    ok &= expect(ListView_GetItemCount(list) == 8 && state.searchQuery.empty() &&
+        !IsWindowEnabled(GetDlgItem(window, IDC_SEARCH_CLEAR)),
+        "Clear restores all groups and disables the clear button");
+
+    // 使用回收站替身验证隐藏结果仍被清理，切换搜索后处理状态仍然可见。
+    seed(window, state, 3);
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"not-present");
+    startCleanup(window, state);
+    ok &= expect(!IsWindowEnabled(GetDlgItem(window, IDC_SEARCH_EDIT)) && finish(state) &&
+        calls == 3 && state.result.totalDup == 0 && ListView_GetItemCount(list) == 0,
+        "Global cleanup includes hidden groups while search is disabled during cleanup");
+    SendMessageW(window, WM_COMMAND, IDC_SEARCH_CLEAR, 0);
+    wchar_t status[32]{};
+    ListView_GetItemText(list, 1, 0, status, static_cast<int>(std::size(status)));
+    ListView_SetItemState(list, 1, LVIS_SELECTED, LVIS_SELECTED);
+    ok &= expect(state.items[1].removed && std::wstring(status) == L"已回收" &&
+        state.preview.message.find(L"回收站") != std::wstring::npos &&
+        !IsWindowEnabled(GetDlgItem(window, IDC_REVEAL_BTN)),
+        "Clearing search preserves recycled status and prevents previewing removed files");
+    return ok;
 }
 
 // 用真正的模态对话框验证关闭时先停止后台任务，再销毁窗口。
@@ -118,20 +165,8 @@ static INT_PTR CALLBACK closeTestProc(HWND window, UINT msg, WPARAM wp, LPARAM l
     return handled;
 }
 
-int main() {
-    fixtureRoot = std::filesystem::current_path() /
-        (L"cleanup-fixtures-" + std::to_wstring(GetCurrentProcessId()));
-    if (!std::filesystem::create_directory(fixtureRoot)) return 2;
-    uiThread = GetCurrentThreadId();
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
-    InitCommonControlsEx(&controls);
-    recycleGate = CreateEventW(nullptr, TRUE, TRUE, nullptr);
-    HWND window = CreateDialogParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_MAIN_DLG), nullptr, DlgProc, 0);
-    if (!window || !recycleGate) return 2;
-    auto* state = reinterpret_cast<DlgData*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+static bool testPartialFailuresAndRetry(HWND window, DlgData* state) {
     bool ok = true;
-
     seed(window, *state, 300);
     ListView_SetItemState(GetDlgItem(window, IDC_LIST), 1, LVIS_SELECTED, LVIS_SELECTED);
     delayMs = 2;
@@ -142,7 +177,7 @@ int main() {
     bool sawProgress = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (state->cleaning && std::chrono::steady_clock::now() < deadline) {
-        pump();
+        pumpMessages();
         const auto pos = SendDlgItemMessageW(window, IDC_PROGRESS, PBM_GETPOS, 0, 0);
         sawProgress |= state->cleaning && pos > 0 && pos < 1000;
         Sleep(1);
@@ -156,6 +191,12 @@ int main() {
                  "Completion reports failures");
     ok &= expect(state->preview.pixels.empty() && state->preview.message.find(L"回收站") != std::wstring::npos &&
         !IsWindowEnabled(GetDlgItem(window, IDC_REVEAL_BTN)), "Recycling the selected file clears its preview and disables reveal");
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"not-present");
+    SendMessageW(window, WM_COMMAND, IDC_SEARCH_CLEAR, 0);
+    wchar_t failedStatus[32]{};
+    ListView_GetItemText(GetDlgItem(window, IDC_LIST), 3, 0, failedStatus, static_cast<int>(std::size(failedStatus)));
+    ok &= expect(std::wstring(failedStatus) == L"清理失败" && !state->items[3].removed,
+        "Search round-trip preserves failed cleanup status for retry");
     failSome = false;
     delayMs = 0;
     calls.store(0);
@@ -165,13 +206,17 @@ int main() {
     ok &= expect(!IsWindowEnabled(GetDlgItem(window, IDC_DELETE_BTN)) &&
         SendDlgItemMessageW(window, IDC_PROGRESS, PBM_GETPOS, 0, 0) == 1000,
         "Successful cleanup reaches full progress and disables cleanup");
+    return ok;
+}
 
+static bool testCancellation(HWND window, DlgData* state) {
+    bool ok = true;
     seed(window, *state, 300);
     ResetEvent(recycleGate);
     startCleanup(window, *state);
     const auto started = std::chrono::steady_clock::now();
     while (calls == 0 && std::chrono::steady_clock::now() - started < std::chrono::seconds(2)) {
-        pump();
+        pumpMessages();
         Sleep(1);
     }
     SendMessageW(window, WM_COMMAND, IDC_SCAN_BTN, 0);
@@ -186,7 +231,11 @@ int main() {
     ok &= expect(finish(*state) && calls == 1 && state->result.totalDup == 299 &&
         label(window, IDC_STATUS).find(L"清理已停止") != std::wstring::npos,
         "Stop preserves the completed result and leaves remaining files untouched");
+    return ok;
+}
 
+static bool testLargeBatchAndWorkerFailure(HWND window, DlgData* state) {
+    bool ok = true;
     seed(window, *state, 5000);
     startCleanup(window, *state);
     ok &= expect(finish(*state) && state->cleanupSucceeded == 5000 && state->result.totalDup == 0,
@@ -201,7 +250,11 @@ int main() {
         label(window, IDC_STATUS).find(L"清理中断") != std::wstring::npos &&
         IsWindowEnabled(GetDlgItem(window, IDC_DELETE_BTN)), "Worker exceptions restore the UI and allow retry");
     throwError = false;
+    return ok;
+}
 
+static bool testFileProtection(HWND window, DlgData* state) {
+    bool ok = true;
     seed(window, *state, 1);
     checkProtection = true;
     startCleanup(window, *state);
@@ -233,15 +286,46 @@ int main() {
                      "Missing copies and missing retained files prevent deletion");
     }
     calls.store(0);
-    ok &= expect(!recycleFile(L"relative.bin") && calls == 0,
+    ok &= expect(!recycleFile(L"relative.bin", state->cleanupOperations) && calls == 0,
                  "Recycle entry rejects relative paths before calling the shell");
+    return ok;
+}
 
+static bool testScanFailure(HWND window, DlgData* state) {
+    bool ok = true;
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"duplicate");
     startScan(window, *state, (fixtureRoot / L"missing-directory").wstring());
+    ok &= expect(state->searchQuery.empty() && label(window, IDC_SEARCH_EDIT).empty() &&
+        !IsWindowEnabled(GetDlgItem(window, IDC_SEARCH_EDIT)),
+        "Starting another scan clears the query and disables search until results arrive");
     const auto scanDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (state->scanning && std::chrono::steady_clock::now() < scanDeadline) { pump(); Sleep(1); }
+    while (state->scanning && std::chrono::steady_clock::now() < scanDeadline) { pumpMessages(); Sleep(1); }
     ok &= expect(!state->scanning && label(window, IDC_STATUS).find(L"扫描失败") != std::wstring::npos &&
         label(window, IDC_STATUS).find(L"missing-directory") != std::wstring::npos &&
         !IsWindowEnabled(GetDlgItem(window, IDC_DELETE_BTN)), "Invalid scan roots show failure and disable cleanup");
+    return ok;
+}
+
+int main() {
+    fixtureRoot = std::filesystem::current_path() /
+        (L"cleanup-fixtures-" + std::to_wstring(GetCurrentProcessId()));
+    if (!std::filesystem::create_directory(fixtureRoot)) return 2;
+    uiThread = GetCurrentThreadId();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
+    InitCommonControlsEx(&controls);
+    recycleGate = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    HWND window = CreateDialogParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_MAIN_DLG), nullptr, DlgProc, 0);
+    if (!window || !recycleGate) return 2;
+    auto* state = reinterpret_cast<DlgData*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    bool ok = true;
+    ok &= searchScenario(window, *state);
+
+    ok &= testPartialFailuresAndRetry(window, state);
+    ok &= testCancellation(window, state);
+    ok &= testLargeBatchAndWorkerFailure(window, state);
+    ok &= testFileProtection(window, state);
+    ok &= testScanFailure(window, state);
     if (state->worker.joinable()) { state->cancelled.store(true); state->worker.join(); }
     DestroyWindow(window);
 

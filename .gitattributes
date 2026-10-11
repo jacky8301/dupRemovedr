@@ -1,0 +1,2 @@
+# 批处理包含中文注释时必须保留 CRLF，避免 cmd 截断命令。
+*.bat text eol=crlf

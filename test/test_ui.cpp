@@ -1,7 +1,7 @@
 // 在隐藏窗口中验证真实控件布局，并导出界面供视觉检查。
-#define wWinMain applicationEntry
-#include "../src/main.cpp"
-#undef wWinMain
+#include "../src/dialog.h"
+#include "test_support.h"
+#include <filesystem>
 
 #include <gdiplus.h>
 #include <cstdio>
@@ -46,11 +46,7 @@ static bool snapshot(HWND window, const wchar_t* filename) {
 static bool waitForPreview(DlgData& state) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (state.preview.request != state.previewRequest && std::chrono::steady_clock::now() < deadline) {
-        MSG message{};
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
+        pumpMessages();
         Sleep(1);
     }
     return state.preview.request == state.previewRequest;
@@ -92,6 +88,11 @@ static bool previewScenario(HWND window, DlgData& state) {
     ok &= snapshot(window, L"ui-preview.png");
     SetWindowPos(window, nullptr, 0, 0, scaled(window, 860), scaled(window, 680), SWP_NOMOVE | SWP_NOZORDER);
     ok &= snapshot(window, L"ui-preview-minimum.png");
+    SetDlgItemTextW(window, IDC_SEARCH_EDIT, L"sample");
+    ok &= ListView_GetItemCount(list) == 2;
+    ok &= waitForPreview(state);
+    ok &= snapshot(window, L"ui-search-minimum.png");
+    SendMessageW(window, WM_COMMAND, IDC_SEARCH_CLEAR, 0);
     ListView_SetItemState(list, 1, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     ok &= waitForPreview(state) && state.preview.pixels.empty() && !state.preview.message.empty();
     ListView_SetItemState(list, 3, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
@@ -122,11 +123,7 @@ int main() {
     startScan(window, *state, root.wstring());
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (state->scanning && std::chrono::steady_clock::now() < deadline) {
-        MSG message{};
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
+        pumpMessages();
         Sleep(1);
     }
     ok &= !state->scanning && state->result.totalFiles == 80 && state->result.totalDup == 7;

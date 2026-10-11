@@ -61,13 +61,99 @@ static unsigned hashWorkerLimit(const std::wstring& folder, unsigned requested) 
         ? limit : 1;
 }
 
-// 工作线程只读文件；回调、分组和统计均由调用线程完成。
-static void hashCandidates(
-    const std::vector<std::pair<std::wstring, uint64_t>>& files,
-    const std::vector<size_t>& candidates, uint64_t size, unsigned workerLimit,
-    const DuplicateScanner::CancelFn& isCancelled,
-    const std::function<void(size_t, const std::string&)>& consume,
-    ScanResult& stats) {
+using HashFiles = std::vector<std::pair<std::wstring, uint64_t>>;
+using HashConsumer = std::function<void(size_t, const std::string&)>;
+
+static void hashSerial(const HashFiles& files, const std::vector<size_t>& candidates,
+                       uint64_t size, const DuplicateScanner::CancelFn& isCancelled,
+                       const HashConsumer& consume, ScanResult& stats) {
+    for (size_t index : candidates) {
+        if (shouldCancel(isCancelled)) return;
+        ++stats.hashedFiles;
+        consume(index, MD5::hashFile(files[index].first, isCancelled, size));
+    }
+}
+
+// 工作线程只发布摘要；取消检查、用户回调和统计仍在调用线程执行。
+class ParallelHashBatch {
+public:
+    ParallelHashBatch(const HashFiles& files, const std::vector<size_t>& candidates, uint64_t size)
+        : files_(files), candidates_(candidates), size_(size),
+          digests_(candidates.size()), ready_(candidates.size(), false) {}
+
+    ~ParallelHashBatch() { join(); }
+
+    void start(unsigned workers) {
+        threads_.reserve(workers);
+        for (unsigned worker = 0; worker < workers; ++worker)
+            threads_.emplace_back([this] { hashNext(); });
+    }
+
+    void consume(const DuplicateScanner::CancelFn& isCancelled, const HashConsumer& consumer) {
+        for (size_t job = 0; job < candidates_.size(); ++job) {
+            if (shouldCancel(isCancelled)) return;
+            std::unique_lock<std::mutex> lock(mutex_);
+            while (!ready_[job] && !failure_) {
+                completed_.wait_for(lock, std::chrono::milliseconds(10));
+                lock.unlock();
+                if (shouldCancel(isCancelled)) return;
+                lock.lock();
+            }
+            if (failure_) std::rethrow_exception(failure_);
+            lock.unlock();
+            consumer(candidates_[job], digests_[job]);
+        }
+    }
+
+    int join() {
+        stop_.store(true);
+        for (auto& thread : threads_) if (thread.joinable()) thread.join();
+        return started_.load();
+    }
+
+private:
+    void hashNext() {
+        try {
+            while (!stop_.load()) {
+                const size_t job = next_.fetch_add(1);
+                if (job >= candidates_.size()) break;
+                ++started_;
+                auto digest = MD5::hashFile(files_[candidates_[job]].first,
+                    [this] { return stop_.load(); }, size_);
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    digests_[job] = std::move(digest);
+                    ready_[job] = true;
+                }
+                completed_.notify_one();
+            }
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!failure_) failure_ = std::current_exception();
+            }
+            stop_.store(true);
+            completed_.notify_one();
+        }
+    }
+
+    const HashFiles& files_;
+    const std::vector<size_t>& candidates_;
+    uint64_t size_;
+    std::vector<std::string> digests_;
+    std::vector<bool> ready_;
+    std::vector<std::thread> threads_;
+    std::atomic<size_t> next_{0};
+    std::atomic<int> started_{0};
+    std::atomic<bool> stop_{false};
+    std::mutex mutex_;
+    std::condition_variable completed_;
+    std::exception_ptr failure_;
+};
+
+static void hashCandidates(const HashFiles& files, const std::vector<size_t>& candidates,
+    uint64_t size, unsigned workerLimit, const DuplicateScanner::CancelFn& isCancelled,
+    const HashConsumer& consume, ScanResult& stats) {
     unsigned workers = static_cast<unsigned>((std::min)(
         static_cast<size_t>(workerLimit), candidates.size()));
     // 小批次的线程创建开销可能超过收益，至少有 8 MiB 待校验内容才并行。
@@ -76,75 +162,19 @@ static void hashCandidates(
         workers = 1;
     stats.hashWorkers = (std::max)(stats.hashWorkers, workers);
     if (workers <= 1) {
-        for (size_t index : candidates) {
-            if (shouldCancel(isCancelled)) return;
-            ++stats.hashedFiles;
-            consume(index, MD5::hashFile(files[index].first, isCancelled, size));
-        }
+        hashSerial(files, candidates, size, isCancelled, consume, stats);
         return;
     }
-
-    std::vector<std::string> digests(candidates.size());
-    std::vector<bool> ready(candidates.size(), false);
-    std::vector<std::thread> threads;
-    std::atomic<size_t> next{0};
-    std::atomic<int> started{0};
-    std::atomic<bool> stop{false};
-    std::mutex mutex;
-    std::condition_variable completed;
-    std::exception_ptr failure;
-    auto join = [&] {
-        stop.store(true);
-        for (auto& thread : threads) if (thread.joinable()) thread.join();
-        stats.hashedFiles += started.load();
-    };
+    ParallelHashBatch batch(files, candidates, size);
     try {
-        threads.reserve(workers);
-        for (unsigned worker = 0; worker < workers; ++worker) {
-            threads.emplace_back([&] {
-                try {
-                    while (!stop.load()) {
-                        const size_t job = next.fetch_add(1);
-                        if (job >= candidates.size()) break;
-                        ++started;
-                        auto digest = MD5::hashFile(files[candidates[job]].first,
-                            [&] { return stop.load(); }, size);
-                        {
-                            std::lock_guard<std::mutex> lock(mutex);
-                            digests[job] = std::move(digest);
-                            ready[job] = true;
-                        }
-                        completed.notify_one();
-                    }
-                } catch (...) {
-                    {
-                        std::lock_guard<std::mutex> lock(mutex);
-                        if (!failure) failure = std::current_exception();
-                    }
-                    stop.store(true);
-                    completed.notify_one();
-                }
-            });
-        }
-        for (size_t job = 0; job < candidates.size(); ++job) {
-            if (shouldCancel(isCancelled)) break;
-            std::unique_lock<std::mutex> lock(mutex);
-            while (!ready[job] && !failure) {
-                completed.wait_for(lock, std::chrono::milliseconds(10));
-                lock.unlock();
-                if (shouldCancel(isCancelled)) { join(); return; }
-                lock.lock();
-            }
-            if (failure) std::rethrow_exception(failure);
-            lock.unlock();
-            consume(candidates[job], digests[job]);
-        }
+        batch.start(workers);
+        batch.consume(isCancelled, consume);
     } catch (...) {
-        // 创建线程或用户回调抛出异常时，也要先等待所有读取结束。
-        join();
+        // 创建线程或用户回调抛出异常时，也要先等待所有读取结束并记录统计。
+        stats.hashedFiles += batch.join();
         throw;
     }
-    join();
+    stats.hashedFiles += batch.join();
 }
 
 // ---- File Enumeration ---------------------------------------------------
